@@ -16,6 +16,7 @@ library(tidyverse)
 library(magrittr)
 library(janitor)
 
+
 #read in spatial data
 eng_wales<- st_read(dsn = "./Data", layer = "Counties_and_Unitary_Authorities_December_2015_Generalised_Clipped_Boundaries_in_England_and_Wales")
 
@@ -23,18 +24,47 @@ eng_wales<- st_read(dsn = "./Data", layer = "Counties_and_Unitary_Authorities_De
 eng <-  eng_wales %>% filter(objectid < 153)
 
 
-#read in excel business data
-all_enterprises<- read_excel("./Data/ukbusinessworkbook2017.xls", sheet = "Table 1", skip = 5)
+#create list of LA tables to be read in
+la_sheet_list<- list(la_enterprises = "Table 1",la_ent_size = "Table 10",
+                     la_turnover = "Table 11", la_industry = "Table 16", 
+                     la_lu_size = "Table 22")
 
-#remove the digits in their
-names(all_enterprises) <- gsub("[[:digit:]]", '', names(all_enterprises), fixed = FALSE)
+#read in all LA table sheets using the map function
+la_sheets<- map(la_sheet_list, read_excel,
+                path ="./Data/ukbusinessworkbook2017.xls", skip = 5)
 
-#use the clean names ifrom the janitor package to remove spaces, colons etc
-#rename the variables beginning with x
-all_enterprises %<>% clean_names() %>% rename("la_code" = "x", "la" = "x_2")
+
+
+# remove the numbers and clean the names from enterprise type date frames
+# use the map function to go through selected list objects
+la_sheets[c("la_enterprises",
+            "la_industry")] <- map(la_sheets[c("la_enterprises",
+                                               "la_industry")],
+                                   function (x) { 
+                                     colnames(x) <- gsub("[[:digit:]]", "", colnames(x))
+                                     return(x)
+                                   }) %>% map(clean_names) %>%
+  map(rename,"la_code" = "x", "la" = "x_2")
+
+## Rename varbales in other columns     
+la_sheets[c("la_ent_size",
+            "la_turnover",
+            "la_lu_size")] %<>% map(rename, "la_code" = "X__1", "la" = "X__2") %>%
+  
+  map(function(x) { colnames(x)<- tolower(colnames(x))
+  return(x)}) %>%
+  
+  map(function (x) { 
+    colnames(x)[4:length(colnames(x))-1] <- paste0("from_"
+                                                   , colnames(x)[4:length(colnames(x))-1])
+    return(x) 
+  })
+
+#create df
+df<-  la_sheets[["la_enterprises"]]
 
 #join together
-eng<- left_join(eng, all_enterprises, by = c("ctyua15cd" = "la_code"))
+eng<- left_join(eng, df, by = c("ctyua15cd" = "la_code"))
 
 # transform coordinates
 eng<- sf::st_transform(eng, crs = 4326)
@@ -63,12 +93,14 @@ fluidPage(
    # Application title
    titlePanel("Number of VAT or PAYE enterprises"),
    
+
    # Sidebar with a selectInput 
    sidebarLayout(
       sidebarPanel(
+
          selectInput("business_type",
                      "Select enterprise type:", 
-                     choices = names(all_enterprises)[3: length(names(all_enterprises))],
+                     choices = names(df)[3: length(names(df))],
                      selected = "total"
                       ),
          
@@ -97,8 +129,8 @@ fluidPage(
 )# End of dashboard page
 
 # Define server logic required to create maps
-server <- function(input, output,session) {
-   
+server <- function(input, output, session) {
+ 
   #To render the dashboard tabs and keep the one you want selected
   output$menu <- renderMenu({
     sidebarMenu(
@@ -108,71 +140,100 @@ server <- function(input, output,session) {
   })
   #isolate({updateTabItems(session, "tabs", "dashboard")})
 
-  
+
+  #create variable based on column selected
   col_name<- reactive({input$business_type})
   
- # map_reactive<- reactive({
-  
+ #
+  eng_update<- eventReactive(input$percentage,{
+    eng$percentage<- round(eng[[col_name()]] / sum(eng[[col_name()]], na.rm =TRUE) * 100,2)
+    eng
+    
+  })
 
     
- # }) # end of map reactive
+ # 
   
   output$map <- renderLeaflet({
     # Use leaflet() here, and only include aspects of the map that
     # won't need to change dynamically (at least, not unless the
     # entire map is being torn down and recreated).
+
+    
+    #join together
+    
+      
+      ## leaflet plot
+    #set colour palette
+    total_pal<- colorNumeric(palette = ("Blues"),eng[["total"]])
+    
+    #create the popup
+     pop_up<- paste0("Local authority: ",
+                    eng[["la"]],
+                   "<br>",
+                  "Percent enterprises: ",
+                   prettyNum(eng[["total"]], big.mark = ","))
+   
+      #plot leaflet map
+      # [[]] this notation tells R to refer to something in a list, which is part of the tilda transformation
+      leaflet(data = eng) %>%
+        addTiles() %>%
+        addPolygons(popup = pop_up, fillColor = ~total_pal(eng$total), fillOpacity = 6, stroke = FALSE) %>%
+        addLegend( pal = total_pal, values = ~eng$total, 
+                   title = "Total")
+
+      
+    #} # end of if statement for map   
+  })# end of renderLeaflet
+  
+  observe({
     if(input$percentage == TRUE){
       
-      eng$percentage <- round(eng[[col_name()]] / sum(eng[[col_name()]], na.rm =TRUE) * 100,2)
-      
       #set colour palette
-      perc_pal<- colorNumeric(palette = ("Blues"),eng$percentage)
+      perc_pal<- colorNumeric(palette = ("Blues"),eng_update()[["percentage"]])
       
       #create the popup
       pop_up<- paste0("Local authority: ",
-                      eng$la,
+                      eng_update()[["la"]],
                       "<br>",
                       "Percent enterprises: ",
-                      prettyNum(eng$percentage, big.mark = ","))
+                      prettyNum(eng_update()[["percentage"]], big.mark = ","))
       
-      leaflet("map", data = eng) %>%
-        addTiles() %>%
-        addPolygons(popup = pop_up, fillColor = ~perc_pal(eng$percentage), fillOpacity = 6, stroke = FALSE) %>%
-        addLegend( pal = perc_pal, values = ~eng$percentage,
+      leafletProxy("map", data = eng_update()) %>%
+        clearShapes() %>%
+        clearControls() %>%
+        addPolygons(popup = pop_up, fillColor = ~perc_pal(eng_update()[["percentage"]]), fillOpacity = 6, stroke = FALSE) %>%
+        addLegend( pal = perc_pal, values = ~eng_update()[["percentage"]],
                    title = paste("Percent", col_name()))
-      
-      
-    } else {
-      
-      ## leaflet plot
+    
+    }
+   
+    }) # end of observe for percentage true
+  
+  observe({
+    if(input$percentage == FALSE){
       
       #set colour palette
       total_pal<- colorNumeric(palette = ("Blues"),eng[[col_name()]])
       
       #create the popup
       pop_up<- paste0("Local authority: ",
-                      eng$la,
+                      eng[["la"]],
                       "<br>",
                       "Total enterprises: ",
                       prettyNum(eng[[col_name()]], big.mark = ","))
       
-      
-      #plot leaflet map
-      # [[]] this notation tells R to refer to something in a list, which is part of the tilda transformation
-      leaflet("map", data = eng) %>%
-        addTiles() %>%
+      leafletProxy("map", data = eng)%>%
+        clearShapes() %>%
+        clearControls() %>%
         addPolygons(popup = pop_up, fillColor = ~total_pal(eng[[col_name()]]), fillOpacity = 6, stroke = FALSE) %>%
         addLegend( pal = total_pal, values = ~eng[[col_name()]], 
                    title = paste("Total", col_name()))
-      
-    } # end of if statement for map   
-  })
+         }
+    
+  }) # end of observe for percentage false
   
-     #observe({
-      # generate bins based on input$bins from ui.R
-     #leafletProxy("map", en())
   
-   #}) # end of renderLeaflet
 }
 
 # Run the application 
