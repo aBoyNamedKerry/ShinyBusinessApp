@@ -60,11 +60,6 @@ la_sheets[c("la_ent_size",
     return(x) 
   })
 
-#create df
-df<-  la_sheets[["la_enterprises"]]
-
-#join together
-eng<- left_join(eng, df, by = c("ctyua15cd" = "la_code"))
 
 # transform coordinates
 eng<- sf::st_transform(eng, crs = 4326)
@@ -91,17 +86,21 @@ ui <- dashboardPage(skin = "red",
 fluidPage(
    
    # Application title
-   titlePanel("Number of VAT or PAYE enterprises"),
+   titlePanel("Business data by local authority"),
    
 
    # Sidebar with a selectInput 
    sidebarLayout(
       sidebarPanel(
 
+        #select dataset to use
+        selectInput("df_set", label = "Select dataset to display",
+                    choices = names(la_sheets), selected = "la_enterprises"),
+        
          selectInput("business_type",
                      "Select enterprise type:", 
-                     choices = names(df)[3: length(names(df))],
-                     selected = "total"
+                     choices = NULL,#[3: length(names(df))],
+                     selected = NULL
                       ),
          
          checkboxInput("percentage", label = "Show map as percentages", value = FALSE )
@@ -140,15 +139,37 @@ server <- function(input, output, session) {
   })
   #isolate({updateTabItems(session, "tabs", "dashboard")})
 
-
+  #update select based on list options
+  observeEvent(input$df_set,{
+    updateSelectInput(session = session, inputId = "business_type",
+                      choices = names(la_sheets[[input$df_set]])[3: length(names(la_sheets[[input$df_set]]))],
+                      selected = "total")
+  })#end of observe for update select
+  
+  #create the reactive data frame based on choise
+  df<-reactive({
+    
+    df<- la_sheets[[input$df_set]]
+    df
+  })
+  
+  #create reactive england data frame for mapping
+  #join together
+  eng_df<- reactive({
+    
+    eng<- left_join(eng, df(), by = c("ctyua15cd" = "la_code"))
+    eng
+  
+  })
+  
   #create variable based on column selected
   col_name<- reactive({input$business_type})
   
  #
   eng_update<- eventReactive(input$percentage,{
-    eng$percentage<- round(eng[[col_name()]] / sum(eng[[col_name()]], na.rm =TRUE) * 100,2)
+     eng<- eng_df()
+    eng$percentage <- round(eng_df()[[input$business_type]] / sum(eng_df()[[input$business_type]], na.rm =TRUE) * 100,2)
     eng
-    
   })
 
     
@@ -159,80 +180,85 @@ server <- function(input, output, session) {
     # won't need to change dynamically (at least, not unless the
     # entire map is being torn down and recreated).
 
-    
-    #join together
-    
-      
       ## leaflet plot
     #set colour palette
-    total_pal<- colorNumeric(palette = ("Blues"),eng[["total"]])
+    total_pal<- colorNumeric(palette = ("Blues"),eng_df()[[input$business_type]])
     
     #create the popup
      pop_up<- paste0("Local authority: ",
-                    eng[["la"]],
+                    eng_df()[["la"]],
                    "<br>",
-                  "Percent enterprises: ",
-                   prettyNum(eng[["total"]], big.mark = ","))
-   
+                  "Number: ",
+                   prettyNum(eng_df()[[input$business_type]], big.mark = ","))
+
       #plot leaflet map
       # [[]] this notation tells R to refer to something in a list, which is part of the tilda transformation
-      leaflet(data = eng) %>%
+      leaflet(data = eng_df()) %>%
         addTiles() %>%
-        addPolygons(popup = pop_up, fillColor = ~total_pal(eng$total), fillOpacity = 6, stroke = FALSE) %>%
-        addLegend( pal = total_pal, values = ~eng$total, 
-                   title = "Total")
+        addPolygons(popup = pop_up, fillColor = ~total_pal(eng_df()[[input$business_type]]), fillOpacity = 6, stroke = FALSE) %>%
+        addLegend( pal = total_pal, values = ~eng_df()[[input$business_type]], 
+                   title = input$business_type)
 
       
     #} # end of if statement for map   
   })# end of renderLeaflet
   
   observe({
-    if(input$percentage == TRUE){
-      
+    
+        if(input$percentage == TRUE){
+
       #set colour palette
       perc_pal<- colorNumeric(palette = ("Blues"),eng_update()[["percentage"]])
-      
+
       #create the popup
       pop_up<- paste0("Local authority: ",
                       eng_update()[["la"]],
                       "<br>",
                       "Percent enterprises: ",
                       prettyNum(eng_update()[["percentage"]], big.mark = ","))
-      
+
       leafletProxy("map", data = eng_update()) %>%
         clearShapes() %>%
         clearControls() %>%
         addPolygons(popup = pop_up, fillColor = ~perc_pal(eng_update()[["percentage"]]), fillOpacity = 6, stroke = FALSE) %>%
         addLegend( pal = perc_pal, values = ~eng_update()[["percentage"]],
                    title = paste("Percent", col_name()))
-    
-    }
-   
-    }) # end of observe for percentage true
+
+     } # enf of observe for update leaflet percent
+
+  })
   
-  observe({
-    if(input$percentage == FALSE){
-      
-      #set colour palette
-      total_pal<- colorNumeric(palette = ("Blues"),eng[[col_name()]])
-      
-      #create the popup
-      pop_up<- paste0("Local authority: ",
-                      eng[["la"]],
-                      "<br>",
-                      "Total enterprises: ",
-                      prettyNum(eng[[col_name()]], big.mark = ","))
-      
-      leafletProxy("map", data = eng)%>%
-        clearShapes() %>%
-        clearControls() %>%
-        addPolygons(popup = pop_up, fillColor = ~total_pal(eng[[col_name()]]), fillOpacity = 6, stroke = FALSE) %>%
-        addLegend( pal = total_pal, values = ~eng[[col_name()]], 
-                   title = paste("Total", col_name()))
-         }
-    
-  }) # end of observe for percentage false
-  
+  # observe({
+  # 
+  #       if(input$percentage == FALSE){
+  # 
+  #         proxy()
+  #         
+  #         invalidateLater(100000, session)
+  # 
+  #         eng_df<- eng_df()
+  # 
+  #     #set colour palette
+  #         total_pal<- colorNumeric(palette = ("Blues"),
+  #                                  eng_df[[input$business_type]])
+  # 
+  #     #create the popup
+  #     pop_up<- paste0("Local authority: ",
+  #                     eng_df[["la"]],
+  #                     "<br>",
+  #                     "Total enterprises: ",
+  #                     prettyNum(eng_df[[input$business_type]], big.mark = ","))
+  # 
+  #   leafletProxy("map", data = eng_df)%>%
+  #       clearShapes() %>%
+  #       clearControls() %>%
+  #       addPolygons(popup = pop_up, fillColor = ~total_pal(eng_df[[input$business_type]]), fillOpacity = 6, stroke = FALSE) %>%
+  #       addLegend( pal = total_pal, values = ~eng_df[[input$business_type]],
+  #                  title = paste("Total", eng_df[[input$business_type]]))
+  #        }
+  # 
+  # }) # end of observe for percentage false
+
   
 }
 
